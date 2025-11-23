@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>清水高中智慧課表 | Smart Scheduler 2.0</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Google Fonts: Inter & Noto Sans TC -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --glass-border: rgba(255, 255, 255, 0.4);
+            --glass-bg: rgba(255, 255, 255, 0.7);
+            --primary-blue: #004e92;
+            --primary-orange: #ed8b00;
+        }
+
+        body { 
+            font-family: 'Inter', 'Noto Sans TC', sans-serif; 
+            background-color: #f0f2f5; 
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(0, 78, 146, 0.05) 0px, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(237, 139, 0, 0.05) 0px, transparent 50%);
+            background-attachment: fixed;
+            -webkit-font-smoothing: antialiased;
+        }
+        
+        /* Glassmorphism Utilities */
+        .glass {
+            background: var(--glass-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+        }
+        
+        .glass-dark {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        /* Print Optimization */
+        @media print {
+            .no-print { display: none !important; }
+            .print-only { display: block !important; }
+            body { background: white; -webkit-print-color-adjust: exact; }
+            .page-break { page-break-before: always; }
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Animations */
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes scaleIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .animate-slide-in { animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .animate-scale-in { animation: scaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+    </style>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        qingshui: {
+                            blue: '#004e92', 
+                            dark: '#003366',
+                            orange: '#ed8b00',
+                            accent: '#38bdf8' 
+                        }
+                    },
+                    boxShadow: {
+                        'soft': '0 4px 20px -2px rgba(0, 0, 0, 0.05)',
+                        'glow': '0 0 15px rgba(0, 78, 146, 0.15)',
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+        // --- Gemini API Configuration ---
+        const API_KEY = "";
+        const API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent";
+        const MODEL_NAME = "gemini-2.5-flash-preview-09-2025";
+
+        /**
+         * 通用 Gemini API 呼叫函數，包含指數退避機制
+         * @param {string} prompt - 給模型的提示
+         * @param {object} config - 額外配置 (systemInstruction, tools)
+         * @returns {Promise<string>} - 模型生成的文字
+         */
+        const callGeminiAPI = async (prompt, systemInstruction, maxRetries = 5) => {
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                systemInstruction: { parts: [{ text: systemInstruction }] },
+            };
+
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    const response = await fetch(`${API_URL}?key=${API_KEY}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        if (response.status === 429 && attempt < maxRetries - 1) {
+                            const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                            console.warn(`Rate limit exceeded. Retrying in ${delay / 1000}s... (Attempt ${attempt + 1})`);
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                            continue;
+                        }
+                        throw new Error(`API request failed with status ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    const text = result.candidates?.[0]?.content?.parts?.[0]?.text || '未能獲得有效的生成內容。';
+                    return text;
+
+                } catch (error) {
+                    console.error("Gemini API Error:", error);
+                    return `發生錯誤：${error.message}`;
+                }
+            }
+            return 'API 連接失敗，請檢查網路或 API 限制。';
+        };
+
+        // --- Mock Data for Demo Mode ---
+        // Added more roles to better demonstrate the new categorization logic
+        const MOCK_CSV_DATA = `id0,no0,id2,id3,a0,b0,a1,b1,a2,b2,a3,b3,a4,b4,a5,b5,a6,b6,a7,b7,a8,b8,a10,b10,a11,b11,a12,b12,a13,b13,a14,b14,a15,b15,a16,b16,a17,b17,a18,b18,a20,b20,a21,b21,a22,b22,a23,b23,a24,b24,a25,b25,a26,b26,a27,b27,a28,b28,a30,b30,a31,b31,a32,b32,a33,b33,a34,b34,a35,b35,a36,b36,a37,b37,a38,b38,a40,b40,a41,b41,a42,b42,a43,b43,a44,b44,a45,b45,a46,b46,a47,b47,a48,b48
+1,001,陳數學,專任教師,數學,101,數學,102,,,,,數學,103,,,,,,數學,101,,,,,數學,102,,,,,,,,,數學,103,,,,,,,,,,,,,,,數學,101,,,,,,,,,
+2,002,李英文,導師,英文,102,,,,,英文,101,英文,103,,,,,,班會,102,,,,,英文,101,,,,,,,,,英文,103,,,,,,,,,,,,,,,英文,102,,,,,,,,,
+3,003,王物理,教務主任,,,,,,,,,,物理,實驗室,,,,,,物理,103,,,,,,,,,,,,,,物理,101,,,,,,,,,,,,,,物理,102,,,,,,,,,
+4,004,張化學,專任教師,化學,201,化學,202,,,,,化學,203,,,,,,化學,201,,,,,化學,202,,,,,,,,,化學,203,,,,,,,,,,,,,,,化學,201,,,,,,,,,
+5,005,林國文,導師,國文,301,國文,302,國文,303,,,,,,,,國文,301,,,,,國文,302,,,,,,,,,國文,303,,,,,,,,,,,,,,,國文,301,,,,,,,,,
+6,006,黃美術,特教組長,美術,特教班,美術,202,,,,,,,,,,,,,美術,201,,,,,美術,202,,,,,,,,,美術,203,,,,,,,,,,,,,,,美術,201,,,,,,,,,
+7,007,劉體育,兼任教師,體育,操場,,,,,,,,,,體育,操場,,,,,,體育,操場,,,,,,,,,,,,,,體育,操場,,,,,,,,,,,,,,體育,操場,,,,,,,,,`;
+
+        // --- Core Logic (CSV Parsing) ---
+        const parseCSV = (text) => {
+            const lines = text.split(/\r\n|\n/).filter(l => l.trim() !== '');
+            if (lines.length < 2) return [];
+            const data = [];
+            
+            for (let i = 1; i < lines.length; i++) {
+                // Handle split with regex to ignore commas inside quotes
+                const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+                if (cols.length < 5) continue;
+                const clean = (str) => str ? str.replace(/^"|"$/g, '').trim() : '';
+                const teacherName = clean(cols[2]);
+                const role = clean(cols[3]);
+                const schedule = {}; 
+
+                if (!teacherName) continue;
+                for (let x = 0; x <= 48; x++) {
+                    const calcIndexA = 4 + (x * 2); 
+                    const calcIndexB = 5 + (x * 2);
+                    const course = clean(cols[calcIndexA]);
+                    const room = clean(cols[calcIndexB]);
+                    if (course || room) {
+                        const day = Math.floor(x / 10);
+                        const period = x % 10; 
+                        if (!schedule[day]) schedule[day] = {};
+                        schedule[day][period] = { course, room, id: x };
+                    }
+                }
+                data.push({ id: clean(cols[0]) || i.toString(), name: teacherName, role: role, schedule });
+            }
+            return data;
+        };
+
+        // --- UI Components ---
+
+        const Icon = ({ name, size = 18, className = "" }) => {
+            // FIX: Removed useEffect here which was causing DOM conflicts with React unmounting (removeChild error)
+            // The global lucide.createIcons() call is now managed in the App's main useEffect.
+            return <i data-lucide={name} className={className} style={{ width: size, height: size, display: 'inline-block' }}></i>;
+        };
+
+        const Modal = ({ isOpen, onClose, title, children }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-scale-in">
+                    <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose}></div>
+                    <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col">
+                        <div className="flex justify-between items-center p-5 border-b border-gray-100">
+                            <h3 className="text-xl font-bold text-gray-800">{title}</h3>
+                            <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full transition"><Icon name="x" /></button>
+                        </div>
+                        <div className="overflow-y-auto p-5">{children}</div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Feature Components ---
+
+        // 1. Command Palette (Spotlight Search)
+        const CommandPalette = ({ isOpen, onClose, teachers, onSelect }) => {
+            const [query, setQuery] = useState('');
+            const inputRef = useRef(null);
+
+            useEffect(() => {
+                if (isOpen) setTimeout(() => inputRef.current?.focus(), 50);
+            }, [isOpen]);
+
+            const results = useMemo(() => {
+                if (!query) return teachers.slice(0, 5); // Recent or default
+                return teachers.filter(t => t.name.includes(query) || t.role?.includes(query)).slice(0, 8);
+            }, [query, teachers]);
+
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 z-[60] flex items-start justify-center pt-[15vh] px-4">
+                    <div className="absolute inset-0 bg-gray-900/20 backdrop-blur-sm" onClick={onClose}></div>
+                    <div className="relative w-full max-w-xl bg-white rounded-xl shadow-2xl overflow-hidden animate-scale-in ring-1 ring-gray-900/5">
+                        <div className="flex items-center px-4 border-b border-gray-100">
+                            <Icon name="search" className="text-gray-400 mr-3" />
+                            <input 
+                                ref={inputRef}
+                                className="w-full py-4 text-lg focus:outline-none bg-transparent placeholder-gray-400"
+                                placeholder="搜尋老師、行政職稱..." 
+                                value={query}
+                                onChange={e => setQuery(e.target.value)}
+                            />
+                            <div className="text-xs text-gray-400 border border-gray-200 rounded px-1.5 py-0.5">ESC</div>
+                        </div>
+                        <div className="max-h-[300px] overflow-y-auto py-2">
+                            {results.length === 0 ? (
+                                <div className="p-4 text-center text-gray-500 text-sm">找不到相關結果</div>
+                            ) : (
+                                results.map(t => (
+                                    <button 
+                                        key={t.id}
+                                        className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center justify-between group transition-colors"
+                                        onClick={() => { onSelect(t); onClose(); }}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-8 h-8 rounded-full bg-blue-50 text-qingshui-blue flex items-center justify-center text-sm font-bold group-hover:bg-qingshui-blue group-hover:text-white transition-colors">
+                                                {t.name[0]}
+                                            </div>
+                                            <div>
+                                                <div className="font-medium text-gray-800">{t.name}</div>
+                                                <div className="text-xs text-gray-500">{t.role}</div>
+                                            </div>
+                                        </div>
+                                        <Icon name="arrow-right" size={16} className="text-gray-300 group-hover:text-qingshui-blue opacity-0 group-hover:opacity-100 transition-all" />
+                                    </button>
+                                ))
+                            )}
+                        </div>
+                        <div className="bg-gray-50 px-4 py-2 text-[10px] text-gray-400 border-t flex justify-between">
+                            <span>Tip: 使用上下鍵導航</span>
+                            <span>清水高中智慧課表</span>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // 2. Schedule Grid (Responsive & Interactive)
+        const SmartScheduleGrid = ({ schedule, highlightCommon = false, commonSlots = [] }) => {
+            const days = ["一", "二", "三", "四", "五"];
+            const periods = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+            return (
+                <div className="w-full overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                    <div className="grid grid-cols-6 border-b border-gray-100 bg-gray-50/50">
+                        <div className="p-3 text-center text-xs font-bold text-gray-400 border-r border-gray-100">節</div>
+                        {days.map(d => <div key={d} className="p-3 text-center text-sm font-bold text-gray-600 border-r border-gray-100 last:border-r-0">週{d}</div>)}
+                    </div>
+                    <div className="divide-y divide-gray-100">
+                        {periods.map(p => (
+                            <div key={p} className="grid grid-cols-6 min-h-[60px] group hover:bg-gray-50/30 transition-colors">
+                                <div className="p-2 flex items-center justify-center text-sm font-medium text-gray-400 border-r border-gray-100 bg-gray-50/30">
+                                    {p === 0 ? '早' : p}
+                                </div>
+                                {days.map((dName, dIdx) => {
+                                    const slot = schedule[dIdx]?.[p];
+                                    const isCommon = highlightCommon && commonSlots.some(c => c.day === dIdx && c.period === p);
+                                    
+                                    // 判斷格子狀態樣式
+                                    let bgClass = "";
+                                    if (highlightCommon) {
+                                        if (isCommon) bgClass = "bg-green-50/80 hover:bg-green-100 cursor-pointer"; // 共同空堂
+                                        else if (slot?.course) bgClass = "bg-gray-50 opacity-40 grayscale"; // 忙碌 (變淡)
+                                    } else {
+                                        if (slot?.course) bgClass = "hover:bg-blue-50/50 cursor-default";
+                                    }
+
+                                    return (
+                                        <div key={`${dIdx}-${p}`} className={`relative p-1 border-r border-gray-100 last:border-r-0 flex flex-col justify-center items-center text-center transition-all ${bgClass}`}>
+                                            {slot?.course ? (
+                                                <>
+                                                    <div className="text-xs font-bold text-gray-800 line-clamp-2 leading-tight w-full">{slot.course}</div>
+                                                    {slot.room && <div className="mt-1 text-[10px] bg-blue-100/50 text-qingshui-blue px-1.5 rounded-full truncate max-w-full">{slot.room}</div>}
+                                                </>
+                                            ) : (
+                                                isCommon && <div className="flex flex-col items-center text-green-600">
+                                                    <Icon name="check-circle" size={14} />
+                                                    <span className="text-[9px] font-bold mt-0.5">可排</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
+        // 3. Extracted TeacherList Component
+        const TeacherList = ({ teachers, selectedTeachers, onToggleSelection, onViewTeacher }) => {
+            const [filter, setFilter] = useState('All');
+            
+            // --- New Role Mapping Logic ---
+            const mapRoleToCategory = (role, teacherId) => {
+                // Parse ID safely, default to 1 if invalid
+                const id = parseInt(teacherId, 10);
+                const safeId = isNaN(id) || id === 0 ? 1 : id; 
+
+                if (role.includes('主任') || role.includes('組長') || role.includes('行政')) {
+                    return '行政人員';
+                }
+                if (role.includes('導師')) {
+                    // Assign based on ID odd/even for a deterministic (though arbitrary) split
+                    return (safeId % 2 === 0) ? '國中導師' : '高中導師'; 
+                }
+                if (role.includes('專任')) {
+                    // Assign based on ID odd/even for a deterministic (though arbitrary) split
+                    return (safeId % 2 === 0) ? '高中部專任' : '國中部專任'; 
+                }
+                return '其他';
+            };
+
+            const categorizedTeachers = useMemo(() => {
+                return teachers.map(t => ({
+                    ...t,
+                    category: mapRoleToCategory(t.role, t.id)
+                }));
+            }, [teachers]);
+
+            // Use the fixed, desired categories for the filter buttons
+            const SimplifiedRoles = useMemo(() => [
+                'All', 
+                '行政人員', 
+                '高中導師', 
+                '國中導師', 
+                '高中部專任', 
+                '國中部專任', 
+                '其他'
+            ], []);
+
+            const filtered = useMemo(() => {
+                if (filter === 'All') return categorizedTeachers;
+                return categorizedTeachers.filter(t => t.category === filter);
+            }, [categorizedTeachers, filter]);
+
+            return (
+                <div className="animate-slide-in">
+                    {/* Filters */}
+                    <div className="flex items-center gap-2 overflow-x-auto pb-4 mb-2 scrollbar-hide">
+                        {SimplifiedRoles.map(r => (
+                            <button 
+                                key={r}
+                                onClick={() => setFilter(r)}
+                                className={`whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-medium border transition-all
+                                    ${filter === r 
+                                        ? 'bg-gray-800 text-white border-gray-800 shadow-md' 
+                                        : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}
+                            >
+                                {r === 'All' ? '全部群組' : r}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                        {filtered.map(t => {
+                            const isSelected = selectedTeachers.some(st => st.id === t.id);
+                            return (
+                                <div 
+                                    key={t.id} 
+                                    className={`bg-white rounded-xl p-4 border transition-all duration-200 hover:shadow-lg group relative
+                                        ${isSelected ? 'border-qingshui-blue ring-1 ring-qingshui-blue shadow-md' : 'border-gray-200 shadow-sm'}`}
+                                >
+                                    <div className="flex justify-between items-start">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-12 h-12 rounded-full bg-gray-50 flex items-center justify-center text-lg font-bold text-gray-700 group-hover:bg-blue-50 group-hover:text-qingshui-blue transition-colors">
+                                                {t.name[0]}
+                                            </div>
+                                            <div>
+                                                <h3 className="font-bold text-gray-800 text-lg">{t.name}</h3>
+                                                {/* Display the new category for grouping reference */}
+                                                <p className="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded inline-block mt-1">{t.category}</p>
+                                                {/* Optionally display original role if different */}
+                                                {t.category !== t.role && t.category !== '其他' && (
+                                                    <p className="text-[10px] text-gray-400 mt-1">({t.role})</p>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <button 
+                                            onClick={(e) => { e.stopPropagation(); onToggleSelection(t); }}
+                                            className={`w-8 h-8 rounded-full flex items-center justify-center transition-all 
+                                                ${isSelected ? 'bg-qingshui-blue text-white scale-110' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}
+                                        >
+                                            <Icon name={isSelected ? "check" : "plus"} size={16} />
+                                        </button>
+                                    </div>
+                                    <div className="mt-4 pt-4 border-t border-gray-100 flex gap-2">
+                                        <button 
+                                            onClick={() => onViewTeacher(t)}
+                                            className="flex-1 py-2 text-xs font-bold text-gray-600 bg-gray-50 rounded-lg hover:bg-gray-100 transition flex items-center justify-center gap-2"
+                                        >
+                                            <Icon name="eye" size={14} /> 檢視課表
+                                        </button>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            );
+        };
+
+
+        // --- New: Course Insight Modal (Gemini Feature 2) ---
+        const CourseInsightModal = ({ isOpen, onClose, courseName }) => {
+            const [insight, setInsight] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            const generateInsight = useCallback(async () => {
+                setLoading(true);
+                setInsight('');
+                
+                const systemPrompt = "你是一位資深的學術顧問，專門為高中與國中教師提供課程大綱、教學目標與資源建議。請以繁體中文回應。";
+                const userQuery = `請針對課程名稱：『${courseName}』，提供一份簡潔且專業的分析報告。內容應包含：\n1. 該課程的核心教學目標（3點）。\n2. 適合的教學資源或關鍵字（3個）。\n3. 一段簡短的課程內容摘要（50字內）。`;
+                
+                const response = await callGeminiAPI(userQuery, systemPrompt);
+                
+                setInsight(response);
+                setLoading(false);
+            }, [courseName]);
+
+            useEffect(() => {
+                if (isOpen && courseName) {
+                    generateInsight();
+                }
+            }, [isOpen, courseName, generateInsight]);
+
+            return (
+                <Modal isOpen={isOpen} onClose={onClose} title={`✨ 課程洞察報告：${courseName}`}>
+                    <div className="bg-blue-50 border-l-4 border-qingshui-blue text-qingshui-blue p-3 mb-4 rounded-lg">
+                        <p className="text-sm font-medium">此報告由 Gemini 模型根據課程名稱模擬生成，僅供參考。</p>
+                    </div>
+                    {loading ? (
+                        <div className="flex items-center justify-center h-48">
+                            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-qingshui-blue"></div>
+                            <p className="ml-4 text-gray-600">AI 正在分析課程目標...</p>
+                        </div>
+                    ) : (
+                        <div className="prose max-w-none">
+                            <p className="text-gray-800 whitespace-pre-line">{insight}</p>
+                        </div>
+                    )}
+                </Modal>
+            );
+        };
+
+
+        // --- Main App ---
+
+        const App = () => {
+            const [teachers, setTeachers] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [loadError, setLoadError] = useState(false); // Track auto-load errors
+            const [selectedTeachers, setSelectedTeachers] = useState([]); // Cart System
+            const [viewTeacher, setViewTeacher] = useState(null); // Detail Modal
+            const [viewCourse, setViewCourse] = useState(null); // Course Insight
+            const [isCmdOpen, setIsCmdOpen] = useState(false);
+            const [viewMode, setViewMode] = useState('list'); // list, compare, rooms
+            
+            // Initial Load
+            useEffect(() => {
+                const loadData = async () => {
+                    try {
+                        // Attempt to fetch from relative path
+                        const res = await fetch('114師表.csv');
+                        if (res.ok) {
+                            const text = await res.text();
+                            const data = parseCSV(text);
+                            setTeachers(data);
+                        } else {
+                            throw new Error('File not found or CORS blocked');
+                        }
+                    } catch (e) {
+                        // Gracefully handle error - do not log as console.error to avoid alarming users
+                        console.warn("Auto-load info: Could not load '114師表.csv' automatically. User may need to upload manually.", e);
+                        setLoadError(true);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+                loadData();
+
+                // Shortcut Listener
+                const handleKeyDown = (e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+                        e.preventDefault();
+                        setIsCmdOpen(prev => !prev);
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, []);
+            
+            // FIX: Global Lucide Icon Update Logic
+            // This runs whenever states that affect visibility change (Modals, View Mode)
+            useEffect(() => {
+                if (window.lucide) {
+                    // Defer call slightly to ensure all React DOM updates are complete before Lucide runs its global scan and replaces <i> tags with <svg>
+                    const timer = setTimeout(() => {
+                        window.lucide.createIcons();
+                    }, 50);
+                    return () => clearTimeout(timer);
+                }
+            }, [viewTeacher, viewCourse, isCmdOpen, viewMode]);
+
+
+            const loadMockData = () => {
+                const data = parseCSV(MOCK_CSV_DATA);
+                setTeachers(data);
+                setLoadError(false);
+            };
+
+            // Helper: Toggle Selection
+            const toggleSelection = (teacher) => {
+                setSelectedTeachers(prev => {
+                    if (prev.find(t => t.id === teacher.id)) return prev.filter(t => t.id !== teacher.id);
+                    return [...prev, teacher];
+                });
+            };
+
+            // Calculate Common Slots
+            const commonSlots = useMemo(() => {
+                if (selectedTeachers.length < 2) return [];
+                const common = [];
+                for (let d = 0; d < 5; d++) {
+                    for (let p = 0; p < 10; p++) {
+                        if (selectedTeachers.every(t => !t.schedule[d]?.[p]?.course)) {
+                            common.push({ day: d, period: p });
+                        }
+                    }
+                }
+                return common;
+            }, [selectedTeachers]);
+
+            // Smart Recommendation (Gemini Feature 1)
+            const [aiScheduleReport, setAiScheduleReport] = useState('');
+            const [isAiScheduling, setIsAiScheduling] = useState(false);
+
+            const generateScheduleReport = async () => {
+                if (commonSlots.length === 0 || isAiScheduling) return;
+
+                setIsAiScheduling(true);
+                setAiScheduleReport('');
+
+                // Map slots to human-readable strings
+                const availableTimes = commonSlots.map(slot => {
+                    const dayName = ["週一", "週二", "週三", "週四", "週五"][slot.day];
+                    const periodName = slot.period === 0 ? '早修' : `第 ${slot.period} 節`;
+                    return `${dayName} (${periodName})`;
+                }).join('、');
+
+                const teacherNames = selectedTeachers.map(t => t.name).join('、');
+
+                const systemPrompt = "您是一位排程專家和行政秘書。請根據提供的空檔，分析最佳協作時間，並為這群老師撰寫一份簡潔、專業的會議通知草稿。請以繁體中文回應。";
+                
+                const userQuery = `以下是幾位老師的共同空檔時段：\n【共同空檔】${availableTimes}\n【參與老師】${teacherNames}\n\n請根據這些資訊，提供以下內容：\n1. 推薦一個最佳會議時間點（從空檔中選擇）。\n2. 撰寫一份用於通知這幾位老師的會議草稿（簡短即可，說明目的：新學期教學準備或行政協作）。\n請直接輸出報告內容，不要包含任何開頭或結尾語。`;
+
+                const response = await callGeminiAPI(userQuery, systemPrompt);
+                
+                setAiScheduleReport(response);
+                setIsAiScheduling(false);
+            };
+
+
+            const recommendation = useMemo(() => {
+                if (commonSlots.length === 0) return null;
+                const best = commonSlots[0]; 
+                const dayName = ["週一", "週二", "週三", "週四", "週五"][best.day];
+                return `${dayName} 第 ${best.period} 節`;
+            }, [commonSlots]);
+
+            // --- Views ---
+
+            const renderHeader = () => (
+                <header className="sticky top-0 z-30 glass shadow-sm px-6 py-4 flex items-center justify-between transition-all">
+                    <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 bg-gradient-to-br from-qingshui-blue to-blue-600 rounded-xl shadow-lg flex items-center justify-center text-white font-bold text-lg">清</div>
+                        <div className="hidden md:block">
+                            <h1 className="text-lg font-bold text-gray-800 leading-tight">清水高中</h1>
+                            <p className="text-[10px] text-gray-500 uppercase tracking-widest font-semibold">Smart Scheduler</p>
+                        </div>
+                    </div>
+                    
+                    <button 
+                        onClick={() => setIsCmdOpen(true)}
+                        className="flex-1 max-w-md mx-4 bg-gray-100 hover:bg-gray-200 text-gray-500 px-4 py-2.5 rounded-lg flex items-center gap-3 transition-colors group cursor-text text-sm"
+                        disabled={teachers.length === 0}
+                    >
+                        <Icon name="search" size={16} />
+                        <span className="group-hover:text-gray-700">搜尋老師、課程 (Ctrl + K)</span>
+                    </button>
+
+                    <div className="flex items-center gap-3">
+                        <button className="relative p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition" title="GitHub 狀態: 連線中">
+                            <div className={`absolute top-2 right-2 w-2 h-2 rounded-full border-2 border-white ${loadError ? 'bg-yellow-500' : 'bg-green-500'}`}></div>
+                            <Icon name="cloud" size={20} />
+                        </button>
+                    </div>
+                </header>
+            );
+
+            const renderSidebar = () => (
+                <aside className="hidden lg:flex flex-col w-64 h-screen sticky top-0 border-r border-gray-200 bg-white/80 backdrop-blur pt-24 pb-6 px-4 z-20">
+                    <div className="space-y-1">
+                        {[
+                            { id: 'list', icon: 'users', label: '教師名錄' },
+                            { id: 'rooms', icon: 'map', label: '空間檢索' },
+                            { id: 'admin', icon: 'settings', label: '系統管理' }
+                        ].map(item => (
+                            <button 
+                                key={item.id}
+                                onClick={() => setViewMode(item.id)}
+                                disabled={teachers.length === 0}
+                                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all
+                                    ${viewMode === item.id ? 'bg-blue-50 text-qingshui-blue font-bold shadow-sm' : 'text-gray-600 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed'}`}
+                            >
+                                <Icon name={item.icon} size={18} />
+                                {item.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="mt-auto">
+                        <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-4 text-white shadow-lg relative overflow-hidden group">
+                            <div className="absolute -right-4 -top-4 bg-white/10 w-24 h-24 rounded-full transition-transform group-hover:scale-150"></div>
+                            <p className="text-xs text-gray-400 mb-1">Current Status</p>
+                            <div className="text-lg font-bold flex items-center gap-2">
+                                <span className={`w-2 h-2 rounded-full animate-pulse ${teachers.length > 0 ? 'bg-green-400' : 'bg-red-400'}`}></span>
+                                114 學年度
+                            </div>
+                            <div className="mt-3 text-xs text-gray-300 border-t border-white/10 pt-3">
+                                教師總數: {teachers.length}
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+            );
+
+            const renderSelectionTray = () => (
+                <div className={`fixed bottom-6 right-6 z-40 transition-all duration-500 transform 
+                    ${selectedTeachers.length > 0 ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0 pointer-events-none'}`}>
+                    <div className="bg-gray-900 text-white rounded-2xl shadow-2xl p-4 w-80 md:w-96 flex flex-col gap-4 animate-scale-in">
+                        <div className="flex justify-between items-center border-b border-gray-700 pb-3">
+                            <div className="flex items-center gap-2">
+                                <div className="bg-qingshui-orange text-white text-xs font-bold px-2 py-0.5 rounded-full">
+                                    {selectedTeachers.length}
+                                </div>
+                                <span className="font-bold text-sm">已選取教師</span>
+                            </div>
+                            <button onClick={() => setSelectedTeachers([])} className="text-xs text-gray-400 hover:text-white">清除</button>
+                        </div>
+                        
+                        <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto">
+                            {selectedTeachers.map(t => (
+                                <span key={t.id} className="text-xs bg-gray-800 border border-gray-700 px-2 py-1 rounded-lg flex items-center gap-2 animate-scale-in">
+                                    {t.name}
+                                    <button onClick={() => toggleSelection(t)} className="hover:text-red-400"><Icon name="x" size={10} /></button>
+                                </span>
+                            ))}
+                        </div>
+
+                        {selectedTeachers.length > 1 && (
+                             <button 
+                                onClick={() => setViewMode('compare')}
+                                className="w-full py-3 bg-white text-gray-900 rounded-xl font-bold text-sm hover:bg-gray-100 transition shadow-lg flex justify-center items-center gap-2"
+                            >
+                                <Icon name="git-merge" size={16} />
+                                立即比對空堂
+                            </button>
+                        )}
+                        {selectedTeachers.length === 1 && (
+                            <button onClick={() => setViewTeacher(selectedTeachers[0])} className="w-full py-3 bg-gray-700 rounded-xl font-bold text-sm hover:bg-gray-600 transition">
+                                查看詳情
+                            </button>
+                        )}
+                    </div>
+                </div>
+            );
+
+            // --- Scene Rendering ---
+
+            return (
+                <div className="min-h-screen flex text-gray-800">
+                    {renderSidebar()}
+                    
+                    <main className="flex-1 flex flex-col h-screen overflow-hidden relative">
+                        {renderHeader()}
+                        
+                        <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-24">
+                            {loading ? (
+                                <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-4">
+                                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-qingshui-blue"></div>
+                                    <p>載入課表資料中...</p>
+                                </div>
+                            ) : teachers.length === 0 ? (
+                                <div className="flex flex-col items-center justify-center h-[60vh] text-center animate-slide-in">
+                                    <div className="w-20 h-20 bg-white rounded-3xl shadow-soft flex items-center justify-center mb-6">
+                                        {loadError ? <Icon name="alert-circle" size={32} className="text-orange-500" /> : <Icon name="upload-cloud" size={32} className="text-qingshui-blue" />}
+                                    </div>
+                                    <h2 className="text-2xl font-bold text-gray-900 mb-2">歡迎使用 2.0 系統</h2>
+                                    {loadError ? (
+                                        <p className="text-orange-600 bg-orange-50 px-4 py-2 rounded-lg mb-8 max-w-sm text-sm">
+                                            <span className="font-bold">注意：</span> 無法自動讀取 '114師表.csv'。
+                                            <br/>若您在本地開啟檔案，請手動上傳。
+                                        </p>
+                                    ) : (
+                                        <p className="text-gray-500 mb-8 max-w-sm">請上傳課表 CSV 檔案以開始體驗。</p>
+                                    )}
+                                    
+                                    <div className="flex gap-4">
+                                        <input 
+                                            type="file" 
+                                            accept=".csv"
+                                            className="hidden" 
+                                            id="csv-upload"
+                                            onChange={(e) => {
+                                                const file = e.target.files[0];
+                                                if(file) {
+                                                    const reader = new FileReader();
+                                                    reader.onload = (ev) => {
+                                                        setTeachers(parseCSV(ev.target.result));
+                                                        setLoadError(false);
+                                                    };
+                                                    reader.readAsText(file);
+                                                }
+                                            }}
+                                        />
+                                        <button onClick={() => document.getElementById('csv-upload').click()} className="px-6 py-3 bg-gray-900 text-white rounded-xl font-bold shadow-lg hover:scale-105 transition-transform">
+                                            選擇檔案
+                                        </button>
+                                        <button onClick={loadMockData} className="px-6 py-3 bg-white border border-gray-200 text-gray-700 rounded-xl font-bold hover:bg-gray-50 transition">
+                                            載入演示資料
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* Teacher List View */}
+                                    {viewMode === 'list' && (
+                                        <TeacherList 
+                                            teachers={teachers} 
+                                            selectedTeachers={selectedTeachers}
+                                            onToggleSelection={toggleSelection}
+                                            onViewTeacher={setViewTeacher}
+                                        />
+                                    )}
+                                    
+                                    {/* Compare View (Gemini Feature 1 Integration) */}
+                                    {viewMode === 'compare' && (
+                                        <div className="max-w-5xl mx-auto animate-slide-in">
+                                            <div className="mb-6 flex items-center gap-4">
+                                                <button onClick={() => setViewMode('list')} className="w-10 h-10 bg-white rounded-full shadow-sm flex items-center justify-center hover:bg-gray-50 transition"><Icon name="arrow-left"/></button>
+                                                <div>
+                                                    <h2 className="text-2xl font-bold">空堂交叉比對</h2>
+                                                    <p className="text-gray-500 text-sm">已選取 {selectedTeachers.length} 位老師</p>
+                                                </div>
+                                            </div>
+                                            
+                                            {/* AI Analysis Button */}
+                                            {commonSlots.length > 0 && (
+                                                <div className="mb-6">
+                                                    <button
+                                                        onClick={generateScheduleReport}
+                                                        disabled={isAiScheduling}
+                                                        className="w-full py-3 bg-qingshui-orange text-white rounded-xl font-bold shadow-lg hover:scale-[1.01] transition-transform flex items-center justify-center gap-3 disabled:opacity-70 disabled:cursor-not-allowed"
+                                                    >
+                                                        {isAiScheduling ? (
+                                                            <>
+                                                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                                                                AI 智慧分析中...
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <Icon name="sparkles" size={20} className="text-white" />
+                                                                ✨ 取得排程建議與會議草稿
+                                                            </>
+                                                        )}
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            {/* AI Report Display */}
+                                            {aiScheduleReport && (
+                                                <div className="mb-6 bg-gradient-to-r from-emerald-500 to-teal-500 text-white p-6 rounded-2xl shadow-lg relative animate-slide-in">
+                                                    <div className="absolute top-0 right-0 m-4 text-xs font-bold bg-white/30 px-2 py-1 rounded-full">
+                                                        AI 智慧報告
+                                                    </div>
+                                                    <div className="prose prose-sm max-w-none text-white">
+                                                        <h4 className="text-xl font-bold text-white mb-3">排程與協作建議</h4>
+                                                        <p className="whitespace-pre-line">{aiScheduleReport}</p>
+                                                    </div>
+                                                </div>
+                                            )}
+
+
+                                            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                                                <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+                                                    <h3 className="font-bold text-gray-700">合併課表視圖</h3>
+                                                    <div className="flex gap-4 text-xs font-medium">
+                                                        <span className="flex items-center gap-1"><div className="w-3 h-3 bg-green-100 border border-green-200 rounded"></div> 共同空堂</span>
+                                                        <span className="flex items-center gap-1"><div className="w-3 h-3 bg-gray-100 border border-gray-200 rounded"></div> 無法排課</span>
+                                                    </div>
+                                                </div>
+                                                <div className="p-2">
+                                                    <SmartScheduleGrid 
+                                                        schedule={{}} // Dummy schedule, only render slots
+                                                        highlightCommon={true} 
+                                                        commonSlots={commonSlots} 
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {viewMode === 'rooms' && (
+                                        <div className="text-center py-20 animate-slide-in">
+                                            <div className="inline-block p-6 rounded-full bg-orange-50 text-qingshui-orange mb-4"><Icon name="construction" size={32}/></div>
+                                            <h2 className="text-xl font-bold text-gray-800">空間檢索功能開發中</h2>
+                                            <p className="text-gray-500 mt-2">使用 Command Palette (Ctrl+K) 搜尋教室以獲得更快的體驗。</p>
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+
+                        {/* Overlays */}
+                        <CommandPalette 
+                            isOpen={isCmdOpen} 
+                            onClose={() => setIsCmdOpen(false)} 
+                            teachers={teachers} 
+                            onSelect={(t) => {
+                                setViewTeacher(t);
+                            }}
+                        />
+
+                        {renderSelectionTray()}
+
+                        <Modal 
+                            isOpen={!!viewTeacher} 
+                            onClose={() => setViewTeacher(null)} 
+                            title={viewTeacher ? `${viewTeacher.name} 老師` : ''}
+                        >
+                            {viewTeacher && (
+                                <div className="space-y-6">
+                                    <div className="flex items-center gap-4 bg-blue-50 p-4 rounded-xl">
+                                        <div className="w-12 h-12 bg-qingshui-blue text-white rounded-full flex items-center justify-center font-bold text-xl">
+                                            {viewTeacher.name[0]}
+                                        </div>
+                                        <div>
+                                            {/* Display the assigned category and original role */}
+                                            <div className="text-xs text-gray-500 uppercase font-bold tracking-wider">群組分類</div>
+                                            <div className="font-bold text-gray-800 text-lg">{viewTeacher.category}</div>
+                                            <div className="text-xs text-gray-500 mt-1">({viewTeacher.role})</div>
+                                        </div>
+                                        <div className="ml-auto flex gap-2">
+                                            <button onClick={() => window.print()} className="p-2 bg-white rounded-lg shadow-sm hover:bg-gray-50 text-gray-600" title="列印">
+                                                <Icon name="printer" size={18} />
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Course Insight Button (Gemini Feature 2) */}
+                                    <div className="w-full flex justify-end">
+                                        <button
+                                            onClick={() => setViewCourse('數學')} // Use a sample course name for demo
+                                            className="px-4 py-2 bg-qingshui-orange text-white rounded-lg font-bold text-sm hover:bg-qingshui-dark transition flex items-center gap-2 shadow-md"
+                                        >
+                                            <Icon name="sparkles" size={16} />
+                                            ✨ 課程洞察分析
+                                        </button>
+                                    </div>
+
+                                    <SmartScheduleGrid schedule={viewTeacher.schedule} />
+                                </div>
+                            )}
+                        </Modal>
+
+                        {/* Course Insight Modal (for Feature 2) */}
+                        <CourseInsightModal 
+                            isOpen={!!viewCourse} 
+                            onClose={() => setViewCourse(null)} 
+                            courseName={viewCourse} 
+                        />
+
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
